@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import { 
   getFirestore, collection, doc, setDoc, onSnapshot, 
-  deleteDoc, updateDoc, getDoc 
+  deleteDoc, updateDoc, getDoc, writeBatch 
 } from 'firebase/firestore';
 import { 
   getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut 
@@ -14,7 +14,8 @@ import {
   ChevronRight, Clock, Calendar, Check, ChevronLeft, Filter, Layers, 
   Trash2, X, PlusSquare, Settings2, Tag, ArrowRightLeft, Loader2,
   AlertCircle, Zap, BarChart3, ListFilter, Activity, LineChart as LineChartIcon,
-  TrendingDown, Star, Info, Eye, EyeOff, Lock, User, Rocket, LogOut, Sun, Moon
+  TrendingDown, Star, Info, Eye, EyeOff, Lock, User, Rocket, LogOut, Sun, Moon,
+  GripVertical
 } from 'lucide-react';
 import { 
   Line, XAxis, YAxis, CartesianGrid, Tooltip, 
@@ -39,6 +40,7 @@ const appId = typeof __app_id !== 'undefined' ? __app_id : 'varivebox-v3-final';
 
 const MONTH_NAMES = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
 const YEARS_LIST = ['2023', '2024', '2025', '2026', '2027', '2028'];
+const CURRENT_YEAR = new Date().getFullYear().toString();
 
 // --- COMPONENTE DE CARD ---
 const StatCard = ({ title, value, sub, icon: Icon, colorClass, active, tooltipList, isDark }) => {
@@ -101,25 +103,26 @@ export default function App() {
   const [purchaseOrders, setPurchaseOrders] = useState([]);
   const [salesPeriods, setSalesPeriods] = useState([]);
   
-  // Dashboard Filters
-  const [dashFilterYear, setDashFilterYear] = useState('Todos');
+  // Dashboard Filters (Padrão Ano Atual)
+  const [dashFilterYear, setDashFilterYear] = useState(CURRENT_YEAR);
   const [dashFilterGroup, setDashFilterGroup] = useState('Todos');
   const [dashFilterModel, setDashFilterModel] = useState('Todos');
   const [dashFilterMode, setDashFilterMode] = useState('year'); 
-  const [dashRangeStart, setDashRangeStart] = useState({ month: 0, year: '2025' });
-  const [dashRangeEnd, setDashRangeEnd] = useState({ month: 11, year: '2025' });
+  const [dashRangeStart, setDashRangeStart] = useState({ month: 0, year: CURRENT_YEAR });
+  const [dashRangeEnd, setDashRangeEnd] = useState({ month: 11, year: CURRENT_YEAR });
 
   // Purchase Filters
-  const [purchaseFilterYear, setPurchaseFilterYear] = useState('Todos');
+  const [purchaseFilterYear, setPurchaseFilterYear] = useState(CURRENT_YEAR);
   const [purchaseSearch, setPurchaseSearch] = useState('');
 
   // UI Control
-  const [selectedYears, setSelectedYears] = useState(['2025']); 
+  const [selectedYears, setSelectedYears] = useState([CURRENT_YEAR]); 
   const [filterMode, setFilterMode] = useState('manual'); 
-  const [rangeStart, setRangeStart] = useState({ month: 0, year: '2025' });
-  const [rangeEnd, setRangeEnd] = useState({ month: 11, year: '2025' });
+  const [rangeStart, setRangeStart] = useState({ month: 0, year: CURRENT_YEAR });
+  const [rangeEnd, setRangeEnd] = useState({ month: 11, year: CURRENT_YEAR });
   const [searchTerm, setSearchTerm] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [draggedItemIdx, setDraggedItemIdx] = useState(null);
 
   // Modals
   const [editingProduct, setEditingProduct] = useState(null);
@@ -190,7 +193,8 @@ export default function App() {
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'products', id), { 
         ...newProductData, 
         sales: editingProduct?.sales || {}, 
-        purchases_map: editingProduct?.purchases_map || {} 
+        purchases_map: editingProduct?.purchases_map || {},
+        sortOrder: editingProduct?.sortOrder || products.length
     }, { merge: true });
     setIsProductModalOpen(false);
   };
@@ -243,6 +247,24 @@ export default function App() {
 
   const handleEditGroup = (g) => { setEditingGroup(g); setNewGroupData({ name: g.name, color: g.color }); };
 
+  // --- DRAG & DROP ---
+  const onDragStart = (idx) => setDraggedItemIdx(idx);
+  const onDragOver = (e) => e.preventDefault();
+  const onDrop = async (targetIdx) => {
+    if (draggedItemIdx === null || draggedItemIdx === targetIdx) return;
+    const items = [...dashboardFilteredData];
+    const draggedItem = items[draggedItemIdx];
+    items.splice(draggedItemIdx, 1);
+    items.splice(targetIdx, 0, draggedItem);
+    const batch = writeBatch(db);
+    items.forEach((item, index) => {
+        const ref = doc(db, 'artifacts', appId, 'public', 'data', 'products', item.id);
+        batch.update(ref, { sortOrder: index });
+    });
+    await batch.commit();
+    setDraggedItemIdx(null);
+  };
+
   // --- SINCRONIZAÇÃO FIREBASE ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (u) => {
@@ -278,19 +300,8 @@ export default function App() {
     });
   }, [salesPeriods]);
 
-  const displayedPeriodsInSales = useMemo(() => {
-    if (filterMode === 'range') {
-      const sVal = (parseInt(rangeStart?.year) || 0) * 12 + (rangeStart?.month || 0);
-      const eVal = (parseInt(rangeEnd?.year) || 0) * 12 + (rangeEnd?.month || 0);
-      return sortedPeriods.filter(p => {
-        const cur = (parseInt(p?.year) || 0) * 12 + (p?.month || 0);
-        return cur >= sVal && cur <= eVal;
-      });
-    }
-    return sortedPeriods.filter(p => (selectedYears || []).includes(String(p?.year)));
-  }, [sortedPeriods, filterMode, rangeStart, rangeEnd, selectedYears]);
-
   const dashPeriods = useMemo(() => {
+    if (dashFilterYear === 'Todos') return sortedPeriods;
     if (dashFilterMode === 'range') {
       const sVal = (parseInt(dashRangeStart?.year) || 0) * 12 + (dashRangeStart?.month || 0);
       const eVal = (parseInt(dashRangeEnd?.year) || 0) * 12 + (dashRangeEnd?.month || 0);
@@ -299,11 +310,12 @@ export default function App() {
         return cur >= sVal && cur <= eVal;
       });
     }
-    return sortedPeriods.filter(p => dashFilterYear === 'Todos' || String(p?.year) === String(dashFilterYear));
+    return sortedPeriods.filter(p => String(p?.year) === String(dashFilterYear));
   }, [sortedPeriods, dashFilterMode, dashRangeStart, dashRangeEnd, dashFilterYear]);
 
   const filteredPurchaseOrders = useMemo(() => {
-    let res = [...(purchaseOrders || [])].sort((a,b) => (b?.order_num || "").localeCompare(a?.order_num || "", undefined, {numeric: true}));
+    // Novas colunas (mais recentes) sempre à direita (crescente por numeração)
+    let res = [...(purchaseOrders || [])].sort((a,b) => (a?.order_num || "").localeCompare(b?.order_num || "", undefined, {numeric: true}));
     if (purchaseFilterYear !== 'Todos') res = res.filter(o => String(o?.order_date || "").startsWith(purchaseFilterYear));
     if (purchaseSearch) {
       const low = purchaseSearch.toLowerCase();
@@ -314,23 +326,26 @@ export default function App() {
 
   const processedDataList = useMemo(() => {
     if (!products) return [];
-    return products.map(p => {
+    const activeOrderIds = new Set(purchaseOrders.map(o => o.id));
+    const activePeriods = salesPeriods.map(p => ({ y: String(p.year), m: p.month }));
+
+    const sortedProducts = [...products].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+
+    return sortedProducts.map(p => {
       const groupInfo = groups.find(g => g.id === p.groupId) || { name: 'Sem Grupo', color: '#94a3b8' };
       
-      const totalSales = Object.values(p?.sales || {}).reduce((acc, y) => {
-        const values = Array.isArray(y) ? y : (typeof y === 'object' && y !== null ? Object.values(y) : []);
-        return acc + values.reduce((s, v) => s + (parseInt(v) || 0), 0);
+      const totalPurchases = Object.entries(p?.purchases_map || {}).reduce((acc, [orderId, qty]) => {
+        if (activeOrderIds.has(orderId)) return acc + (parseInt(qty) || 0);
+        return acc;
       }, 0);
 
-      const totalPurchases = Object.entries(p?.purchases_map || {}).reduce((acc, [_, q]) => acc + (parseInt(q) || 0), 0);
+      const totalSales = activePeriods.reduce((acc, period) => {
+        const val = p?.sales?.[period.y]?.[period.m] || 0;
+        return acc + (parseInt(val) || 0);
+      }, 0);
+
       const stock = totalPurchases - totalSales;
       const turnoverPerc = totalPurchases > 0 ? (totalSales / totalPurchases) * 100 : 0;
-
-      let recommendation = "OK";
-      let recColor = isDark ? "bg-green-500/20 text-green-400" : "bg-green-100 text-green-700";
-      if (stock <= 0) { recommendation = "CRÍTICO"; recColor = "bg-red-600 text-white animate-pulse"; }
-      else if (turnoverPerc >= 80) { recommendation = "URGENTE"; recColor = "bg-orange-500 text-white"; }
-      else if (turnoverPerc >= 50) { recommendation = "ALERTA"; recColor = "bg-yellow-400 text-black"; }
 
       const getMetrics = (n) => {
         const lastN = sortedPeriods.slice(-n);
@@ -338,26 +353,23 @@ export default function App() {
         return { units: winSumVal, perc: totalSales > 0 ? ((winSumVal / totalSales) * 100).toFixed(0) : 0 };
       };
 
-      const last6 = sortedPeriods.slice(-6);
-      const soldLast6 = last6.reduce((s, pr) => s + (parseInt(p?.sales?.[pr.year]?.[pr.month]) || 0), 0);
-      const isSlowMover = turnoverPerc < 20 || (last6.length >= 6 && soldLast6 === 0);
+      let activeMCount = 0;
+      activePeriods.forEach(period => { if (parseInt(p?.sales?.[period.y]?.[period.m] || 0) > 0) activeMCount++; });
 
-      let activeM = 0;
-      Object.values(p?.sales || {}).forEach(arr => { 
-        const values = Array.isArray(arr) ? arr : (typeof arr === 'object' && arr !== null ? Object.values(arr) : []);
-        values.forEach(v => { if(parseInt(v) > 0) activeM++; }); 
-      });
-      const freq = activeM / (salesPeriods?.length || 1);
+      const recommendation = stock <= 0 ? "CRÍTICO" : turnoverPerc >= 80 ? "URGENTE" : turnoverPerc >= 50 ? "ALERTA" : "OK";
+      const recColor = stock <= 0 ? "bg-red-600 text-white animate-pulse" : turnoverPerc >= 80 ? "bg-orange-500 text-white" : turnoverPerc >= 50 ? "bg-yellow-400 text-black" : (isDark ? "bg-green-500/20 text-green-400" : "bg-green-100 text-green-700");
+      
+      const freq = activeMCount / (salesPeriods?.length || 1);
       const constLabel = freq >= 0.8 ? "Mensal" : freq >= 0.4 ? "Trimestral" : freq >= 0.2 ? "Semestral" : "Inativo";
       const constClr = freq >= 0.8 ? "text-blue-500" : freq >= 0.4 ? "text-green-500" : freq >= 0.2 ? "text-yellow-600" : "text-red-500 font-black italic";
 
       return { 
         ...p, groupInfo, totalSales, totalPurchases, stock, recommendation, recColor, 
-        turnoverPerc, isSlowMover, constLabel, constClr, activeM,
+        turnoverPerc, constLabel, constClr, activeM: activeMCount,
         s3m: getMetrics(3), s6m: getMetrics(6), s12m: getMetrics(12)
       };
     });
-  }, [products, groups, salesPeriods, sortedPeriods, isDark]);
+  }, [products, groups, salesPeriods, sortedPeriods, purchaseOrders, isDark]);
 
   const dashboardFilteredData = useMemo(() => {
     let res = [...processedDataList];
@@ -377,8 +389,8 @@ export default function App() {
       return accProd + (dashPeriods || []).reduce((accP, dp) => accP + (parseInt(p?.sales?.[dp.year]?.[dp.month]) || 0), 0);
     }, 0);
     const urg = data.filter(p => (p?.turnoverPerc || 0) >= 80 || (p?.stock || 0) <= 0);
-    const slow = data.filter(p => p?.isSlowMover);
-    const top = [...data].sort((a,b) => (b.s12m?.units || 0) * (b.activeM || 0) - (a.s12m?.units || 0) * (a.activeM || 0))[0];
+    const slow = data.filter(p => p?.totalSales === 0 && p?.totalPurchases > 0);
+    const top = [...data].sort((a,b) => (b.s12m?.units || 0) - (a.s12m?.units || 0))[0];
     return { est, ven, urg, slow, top };
   }, [dashboardFilteredData, dashPeriods]);
 
@@ -388,7 +400,6 @@ export default function App() {
         dashboardFilteredData.forEach(prod => { sum += (parseInt(prod?.sales?.[period.year]?.[period.month]) || 0); });
         return { label: `${MONTH_NAMES[period.month]}/${String(period.year).slice(-2)}`, value: sum, x: index };
     });
-
     if (dataPoints.length < 2) return { points: dataPoints, forecast: 0 };
     const n = dataPoints.length;
     let sx=0, sy=0, sxy=0, sx2=0;
@@ -400,54 +411,38 @@ export default function App() {
     return { points: dataPoints.map(d => ({ ...d, trend: Math.max(0, Math.round(m * d.x + b)) })), forecast: Math.max(0, Math.round(m * n + b)) };
   }, [dashboardFilteredData, dashPeriods]);
 
+  const displayedPeriodsInSalesTable = useMemo(() => {
+    if (filterMode === 'all') return sortedPeriods;
+    if (filterMode === 'range') {
+      const sVal = (parseInt(rangeStart?.year) || 0) * 12 + (rangeStart?.month || 0);
+      const eVal = (parseInt(rangeEnd?.year) || 0) * 12 + (rangeEnd?.month || 0);
+      return sortedPeriods.filter(p => {
+        const cur = (parseInt(p?.year) || 0) * 12 + (p?.month || 0);
+        return cur >= sVal && cur <= eVal;
+      });
+    }
+    return sortedPeriods.filter(p => (selectedYears || []).includes(String(p?.year)));
+  }, [sortedPeriods, filterMode, rangeStart, rangeEnd, selectedYears]);
+
   if (authLoading) return <div className="h-screen flex items-center justify-center bg-slate-950"><Loader2 className="animate-spin text-orange-500" size={40}/></div>;
 
   return (
     <div className={`flex h-screen font-sans overflow-hidden font-bold transition-colors duration-300 ${isDark ? 'bg-slate-950 text-white' : 'bg-[#f8fafc] text-slate-900'}`}>
       <style>{`
-        /* FORÇAR TEXTO BRANCO EM CABEÇALHOS COLORIDOS (Crucial para todos os temas) */
-        .high-contrast-text, 
-        .table-header-dark th,
-        thead[class*="bg-"] th,
-        th[class*="bg-"] {
+        .high-contrast-text, .table-header-dark th, th[class*="bg-orange-"], th[class*="bg-blue-"], .bg-orange-600 input, .bg-blue-600 input, .bg-orange-500 input, .bg-orange-500 button {
           color: #ffffff !important;
           text-shadow: 1px 1px 0px rgba(0,0,0,0.8), -0.5px -0.5px 0px rgba(0,0,0,0.8) !important;
         }
-
-        /* Contorno sutil para texto normal */
-        h2, h3, p, span, td, th, label, input, select, button {
-          text-shadow: 0.5px 0.5px 0px rgba(0,0,0,0.1);
-        }
-        
-        .theme-select {
-          background-color: ${isDark ? '#1e293b' : '#ffffff'} !important;
-          color: ${isDark ? '#ffffff' : '#0f172a'} !important;
-          border-color: ${isDark ? '#334155' : '#cbd5e1'} !important;
-        }
-
-        .theme-input {
-          background-color: ${isDark ? '#0f172a' : '#ffffff'} !important;
-          color: ${isDark ? '#ffffff' : '#0f172a'} !important;
-          border-color: ${isDark ? '#334155' : '#cbd5e1'} !important;
-        }
-
-        .table-header-dark {
-          background-color: #0f172a !important;
-          color: #ffffff !important;
-        }
-
-        ${isDark ? `
-          .text-white, td, th, h2, h3 { 
-            color: #ffffff !important;
-            text-shadow: 0.8px 0.8px 0px #000;
-          }
-        ` : `
-          .text-slate-900, td, th, h2, h3 { color: #0f172a !important; }
-        `}
-
+        h2, h3, p, span, td, th, label, input, select, button { text-shadow: 0.5px 0.5px 0px rgba(0,0,0,0.1); }
+        .theme-select { background-color: ${isDark ? '#1e293b' : '#ffffff'} !important; color: ${isDark ? '#ffffff' : '#0f172a'} !important; border-color: ${isDark ? '#334155' : '#cbd5e1'} !important; }
+        .theme-input { background-color: ${isDark ? '#0f172a' : '#ffffff'} !important; color: ${isDark ? '#ffffff' : '#0f172a'} !important; border-color: ${isDark ? '#334155' : '#cbd5e1'} !important; }
+        .table-header-dark { background-color: #0f172a !important; color: #ffffff !important; }
+        ${isDark ? `.text-white, td, th, h2, h3 { color: #ffffff !important; text-shadow: 0.8px 0.8px 0px #000; }` : `.text-slate-900, td, th, h2, h3 { color: #0f172a !important; }`}
         .status-badge { text-shadow: 1px 1px 0px rgba(0,0,0,0.4) !important; color: #fff !important; font-weight: 900; }
         .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #64748b; border-radius: 10px; }
+        .drag-row { cursor: grab; transition: all 0.2s; }
+        .drag-row:active { cursor: grabbing; opacity: 0.5; background: #e2e8f0; transform: scale(0.99); }
       `}</style>
 
       {!user ? (
@@ -517,6 +512,7 @@ export default function App() {
             <div className={`flex-1 overflow-y-auto p-6 space-y-8 transition-colors ${isDark ? 'bg-slate-950' : 'bg-slate-50/50'}`}>
               {activeTab === 'dashboard' && (
                 <div className="space-y-8 animate-in fade-in font-bold">
+                  {/* Filtros Dashboard */}
                   <div className={`p-4 rounded-2xl border-2 shadow-sm flex flex-wrap gap-8 items-center ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
                       <div className="flex flex-col gap-1">
                         <span className="text-[9px] uppercase font-black opacity-60">Modo Filtro</span>
@@ -525,16 +521,12 @@ export default function App() {
                             <button onClick={() => setDashFilterMode('range')} className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${dashFilterMode === 'range' ? 'bg-orange-500 text-white shadow-sm' : 'text-slate-500'}`}>Intervalo</button>
                         </div>
                       </div>
-
-                      {dashFilterMode === 'year' && (
-                        <div className="space-y-1">
-                          <span className="text-[9px] uppercase font-black opacity-60">Janela</span>
-                          <select className="block text-xs font-black rounded-lg border-2 p-2 outline-none theme-select" value={dashFilterYear} onChange={e => setDashFilterYear(e.target.value)}>
-                            <option value="Todos">Todo Histórico</option>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}
-                          </select>
-                        </div>
-                      )}
-
+                      <div className="space-y-1">
+                        <span className="text-[9px] uppercase font-black opacity-60">Janela</span>
+                        <select className="block text-xs font-black rounded-lg border-2 p-2 outline-none theme-select" value={dashFilterYear} onChange={e => setDashFilterYear(e.target.value)}>
+                          <option value="Todos">Ver Tudo (Histórico)</option>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}
+                        </select>
+                      </div>
                       {dashFilterMode === 'range' && (
                         <div className="space-y-1">
                           <span className="text-[9px] uppercase font-black opacity-60">Intervalo Customizado</span>
@@ -547,7 +539,6 @@ export default function App() {
                           </div>
                         </div>
                       )}
-
                       <div className="space-y-1"><span className="text-[9px] uppercase font-black opacity-60">Grupo</span><select className="block text-xs font-black rounded-lg border-2 p-2 outline-none theme-select" value={dashFilterGroup} onChange={e => setDashFilterGroup(e.target.value)}><option value="Todos">Todos os Grupos</option>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></div>
                       <div className="space-y-1"><span className="text-[9px] uppercase font-black opacity-60">Modelo</span><select className="block text-xs font-black rounded-lg border-2 p-2 outline-none theme-select" value={dashFilterModel} onChange={e => setDashFilterModel(e.target.value)}><option value="Todos">Todos os Modelos</option>{products.map(p => <option key={p.id} value={p.id}>{p.cod}</option>)}</select></div>
                   </div>
@@ -556,7 +547,7 @@ export default function App() {
                     <StatCard title="Estoque Atual" value={dashboardKPIs.est} sub="Unidades em Mão" icon={Package} colorClass="border-blue-500" isDark={isDark} />
                     <StatCard title="Vendas no Período" value={dashboardKPIs.ven} sub="Total Unidades" icon={TrendingUp} colorClass="border-green-500" isDark={isDark} />
                     <StatCard title="Urgência" value={dashboardKPIs.urg.length} sub="Giro Crítico" icon={AlertCircle} colorClass="border-orange-500" active={dashboardKPIs.urg.length > 0} tooltipList={dashboardKPIs.urg} isDark={isDark} />
-                    <StatCard title="Baixo Giro" value={dashboardKPIs.slow.length} sub="Sem Saída" icon={TrendingDown} colorClass="border-slate-400" tooltipList={dashboardKPIs.slow} isDark={isDark} />
+                    <StatCard title="Sem Giro" value={dashboardKPIs.slow.length} sub="Nunca Vendidos" icon={TrendingDown} colorClass="border-slate-400" tooltipList={dashboardKPIs.slow} isDark={isDark} />
                     <StatCard title="Previsão Próx" value={chartResults.forecast} sub="IA Estimativa" icon={Zap} colorClass="border-purple-500 text-purple-500" isDark={isDark} />
                     <StatCard title="Carro-Chefe" value={dashboardKPIs.top?.cod || "---"} sub="Melhor Saída" icon={Star} colorClass="border-yellow-500 text-yellow-500" isDark={isDark} />
                   </div>
@@ -571,16 +562,25 @@ export default function App() {
                         <Tooltip contentStyle={{ borderRadius: '16px', border: 'none', backgroundColor: isDark ? '#0f172a' : '#fff', color: isDark ? '#fff' : '#000' }} />
                         <Legend verticalAlign="top" align="right" wrapperStyle={{fontSize: '10px'}} />
                         <Bar dataKey="value" name="Vendas" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={35} />
-                        <Line type="monotone" dataKey="trend" name="Tendência IA" stroke="#f97316" strokeWidth={2.5} dot={false} strokeDasharray="5 5" />
+                        <Line type="monotone" dataKey="trend" name="Tendência IA" stroke="#f97316" strokeWidth={2} dot={false} strokeDasharray="5 5" />
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
 
+                  {/* TABELA DE INTELIGÊNCIA RESTAURADA */}
                   <div className={`rounded-3xl border-2 shadow-sm overflow-hidden ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
                       <div className={`p-4 flex items-center gap-2 font-black uppercase text-xs border-b ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-950 text-white'}`}><ListFilter size={18} className="text-orange-500" /> Inteligência de Performance</div>
                       <table className="w-full text-xs text-left font-black">
-                        <thead className={`${isDark ? 'bg-slate-800/50 text-slate-400' : 'bg-slate-100 text-slate-600'} uppercase font-black border-b ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
-                          <tr><th className="p-4">Modelo</th><th className="text-center">Giro Total %</th><th className="text-center">3m %</th><th className="text-center">6m %</th><th className="text-center">12m %</th><th className="text-center">Constância</th><th className="text-center">Status</th></tr>
+                        <thead className="uppercase text-[10px] font-black table-header-dark text-white">
+                          <tr>
+                            <th className="p-4 high-contrast-text">Modelo</th>
+                            <th className="text-center high-contrast-text">Giro Total %</th>
+                            <th className="text-center high-contrast-text">Janela 3m</th>
+                            <th className="text-center high-contrast-text">Janela 6m</th>
+                            <th className="text-center high-contrast-text">Janela 12m</th>
+                            <th className="text-center high-contrast-text">Constância</th>
+                            <th className="text-center high-contrast-text">Status</th>
+                          </tr>
                         </thead>
                         <tbody className={`divide-y ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
                           {dashboardFilteredData.sort((a,b) => (b.turnoverPerc || 0) - (a.turnoverPerc || 0)).map(p => (
@@ -590,7 +590,18 @@ export default function App() {
                                   <div className="text-[9px] text-slate-500 uppercase font-bold">{p.groupInfo.name}</div>
                               </td>
                               <td className={`p-4 text-center font-black ${isDark ? 'text-slate-300' : 'text-slate-900'}`}>{p.turnoverPerc.toFixed(1)}%</td>
-                              {[p.s3m, p.s6m, p.s12m].map((win, idx) => (<td key={idx} className="p-4 text-center cursor-help group-hover:text-blue-500 transition-colors" title={`${win.units} unidades`}><span className="font-black">{win.perc}%</span></td>))}
+                              <td className="p-4 text-center">
+                                <div className="text-[10px] text-blue-500">{p.s3m.perc}%</div>
+                                <div className="text-[9px] opacity-50">{p.s3m.units} un</div>
+                              </td>
+                              <td className="p-4 text-center">
+                                <div className="text-[10px] text-blue-500">{p.s6m.perc}%</div>
+                                <div className="text-[9px] opacity-50">{p.s6m.units} un</div>
+                              </td>
+                              <td className="p-4 text-center">
+                                <div className="text-[10px] text-blue-500">{p.s12m.perc}%</div>
+                                <div className="text-[9px] opacity-50">{p.s12m.units} un</div>
+                              </td>
                               <td className="p-4 text-center font-black"><div className={p.constClr}>{p.constLabel}</div></td>
                               <td className="p-4 text-center"><span className={`status-badge px-3 py-1 rounded-full text-[9px] uppercase shadow-sm ${p.recColor}`}>{p.recommendation}</span></td>
                             </tr>
@@ -609,7 +620,7 @@ export default function App() {
                         <div className="flex items-center gap-2 border-l pl-6 border-slate-200 dark:border-slate-700">
                           <span className="text-[10px] uppercase opacity-70">Ano:</span>
                           <select className="p-2 rounded-lg text-xs font-black border-2 outline-none theme-select" value={purchaseFilterYear} onChange={e => setPurchaseFilterYear(e.target.value)}>
-                            <option value="Todos">Todos</option>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}
+                            <option value="Todos">Ver Tudo</option>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}
                           </select>
                         </div>
                         <div className="relative">
@@ -617,7 +628,7 @@ export default function App() {
                           <input type="text" placeholder="Busca de Lote / NF..." className="pl-10 pr-4 py-2 rounded-xl text-xs font-black border-2 outline-none theme-select focus:border-orange-500 transition-all" value={purchaseSearch} onChange={e => setPurchaseSearch(e.target.value)} />
                         </div>
                       </div>
-                      <button onClick={addNewOrder} className="bg-blue-600 text-white px-6 py-2.5 rounded-xl text-xs font-black uppercase shadow-lg hover:bg-blue-700 active:scale-95 transition-all border-2 border-transparent flex items-center gap-2"><Plus size={16} /> Novo Lote</button>
+                      <button onClick={addNewOrder} className="bg-blue-600 text-white px-6 py-2.5 rounded-xl text-xs font-black uppercase shadow-lg hover:bg-blue-700 active:scale-95 border-2 border-transparent flex items-center gap-2"><Plus size={16} /> Novo Lote</button>
                     </div>
 
                     <div className={`rounded-2xl border-2 shadow-xl overflow-hidden font-black ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -625,7 +636,7 @@ export default function App() {
                         <table className="w-full text-sm border-collapse font-black">
                           <thead className="uppercase text-[10px] font-black table-header-dark text-white">
                             <tr className="border-b border-slate-700">
-                              <th className="p-4 text-left bg-[#0f172a] text-blue-400 sticky left-0 z-20 font-black min-w-[200px]">Nº COMPRA:</th>
+                              <th className="p-4 text-left bg-[#0f172a] text-blue-400 sticky left-0 z-20 font-black min-w-[200px] high-contrast-text">Nº COMPRA:</th>
                               {filteredPurchaseOrders.map(o => (
                                 <th className="p-4 text-center bg-orange-600 text-white border-l border-orange-700 group relative min-w-[140px] font-black" key={o.id}>
                                   <input className="w-full bg-transparent text-center outline-none font-black text-lg high-contrast-text" value={o.order_num || ''} onChange={e => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', o.id), {order_num: e.target.value})} />
@@ -636,7 +647,7 @@ export default function App() {
                             </tr>
                             {['order_date', 'arrival_date', 'invoice'].map((f) => (
                               <tr key={f} className="border-b border-slate-700">
-                                <th className={`p-3 text-left font-black sticky left-0 z-20 uppercase tracking-tighter bg-[#0f172a] text-white/80`}>{f === 'order_date' ? 'PEDIDO' : f === 'arrival_date' ? 'CHEGADA' : 'NF'}</th>
+                                <th className={`p-3 text-left font-black sticky left-0 z-20 uppercase tracking-tighter bg-[#0f172a] text-white/80 high-contrast-text`}>{f === 'order_date' ? 'PEDIDO' : f === 'arrival_date' ? 'CHEGADA' : 'NF'}</th>
                                 {filteredPurchaseOrders.map(o => (
                                   <th key={o.id} className="p-2 border-l border-slate-700 font-black bg-slate-800/40">
                                     <input type={f.includes('date') ? 'date' : 'text'} className="w-full bg-transparent text-center font-black text-[10px] text-white uppercase outline-none high-contrast-text" value={o[f] || ''} onChange={e => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', o.id), {[f]: e.target.value})} />
@@ -672,22 +683,10 @@ export default function App() {
                          <div className="flex bg-slate-100 dark:bg-slate-800 p-1 rounded-xl border border-slate-200 dark:border-slate-700">
                             <button onClick={() => setFilterMode('manual')} className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${filterMode === 'manual' ? 'bg-orange-500 text-white shadow-sm' : 'text-slate-500'}`}>Ano</button>
                             <button onClick={() => setFilterMode('range')} className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${filterMode === 'range' ? 'bg-orange-500 text-white shadow-sm' : 'text-slate-500'}`}>Intervalo</button>
+                            <button onClick={() => setFilterMode('all')} className={`px-4 py-1.5 rounded-lg text-xs font-black transition-all ${filterMode === 'all' ? 'bg-orange-500 text-white shadow-sm' : 'text-slate-500'}`}>Tudo</button>
                          </div>
                          {filterMode === 'manual' && (
                            <select className="p-2 rounded-xl text-xs font-black border-2 outline-none theme-select" value={selectedYears[0]} onChange={e => setSelectedYears([e.target.value])}>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}</select>
-                         )}
-                         {filterMode === 'range' && (
-                           <div className="flex items-center gap-2">
-                             <div className="flex gap-1">
-                               <select className={`p-2 rounded-xl text-[10px] font-black border-2 outline-none theme-select`} value={rangeStart.month} onChange={e => setRangeStart({...rangeStart, month: parseInt(e.target.value)})}>{MONTH_NAMES.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
-                               <select className={`p-2 rounded-xl text-[10px] font-black border-2 outline-none theme-select`} value={rangeStart.year} onChange={e => setRangeStart({...rangeStart, year: e.target.value})}>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}</select>
-                             </div>
-                             <span className="text-slate-400">até</span>
-                             <div className="flex gap-1">
-                               <select className={`p-2 rounded-xl text-[10px] font-black border-2 outline-none theme-select`} value={rangeEnd.month} onChange={e => setRangeEnd({...rangeEnd, month: parseInt(e.target.value)})}>{MONTH_NAMES.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
-                               <select className={`p-2 rounded-xl text-[10px] font-black border-2 outline-none theme-select`} value={rangeEnd.year} onChange={e => setRangeEnd({...rangeEnd, year: e.target.value})}>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}</select>
-                             </div>
-                           </div>
                          )}
                        </div>
                        <button onClick={() => setIsPeriodModalOpen(true)} className="bg-orange-500 text-white px-5 py-2 rounded-xl text-xs flex items-center gap-2 font-black uppercase hover:bg-orange-600 transition-all shadow-lg border-2 border-transparent"><PlusSquare size={16}/> Novo Mês</button>
@@ -699,8 +698,8 @@ export default function App() {
                        <table className="w-full text-sm border-collapse font-black">
                          <thead className="uppercase text-[10px] font-black table-header-dark text-white sticky top-0 z-10">
                            <tr>
-                             <th className="p-5 text-left sticky left-0 z-20 bg-[#0f172a] border-r border-slate-700 min-w-[180px]">Produto</th>
-                             {displayedPeriodsInSales.map(p => (
+                             <th className="p-5 text-left sticky left-0 z-20 bg-[#0f172a] border-r border-slate-700 min-w-[180px] high-contrast-text">Produto</th>
+                             {displayedPeriodsInSalesTable.map(p => (
                                <th key={p.id} className="p-4 text-center text-orange-400 border-l border-slate-700 group font-black whitespace-nowrap min-w-[100px] bg-[#0f172a]">
                                   <span className="high-contrast-text">{MONTH_NAMES[p.month]}/{String(p.year).slice(-2)}</span>
                                   <button onClick={() => { setPeriodToDelete(p); setIsPeriodDeleteModalOpen(true); }} className="ml-2 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><X size={10} /></button>
@@ -712,14 +711,14 @@ export default function App() {
                          </thead>
                          <tbody className={`divide-y-2 ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
                            {dashboardFilteredData.map(p => {
-                             const totalFilteredSales = displayedPeriodsInSales.reduce((acc, dp) => acc + (parseInt(p?.sales?.[dp.year]?.[dp.month]) || 0), 0);
+                             const totalFilteredSales = displayedPeriodsInSalesTable.reduce((acc, dp) => acc + (parseInt(p?.sales?.[dp.year]?.[dp.month]) || 0), 0);
                              return (
                                <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black">
                                  <td className={`p-4 font-black border-l-4 sticky left-0 z-10 border-r-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`} style={{ borderLeftColor: p.groupInfo.color }}>
                                     <div className="text-sm">{p.cod}</div>
                                     <div className="text-[9px] text-slate-500 italic uppercase font-black truncate max-w-[150px]">{p.desc}</div>
                                  </td>
-                                 {displayedPeriodsInSales.map(dp => (
+                                 {displayedPeriodsInSalesTable.map(dp => (
                                    <td key={dp.id} className="p-2 border-l border-slate-200/10 text-center">
                                      <input type="number" min="0" defaultValue={p?.sales?.[dp.year]?.[dp.month] || 0} onBlur={(e) => updateMonthlySale(p.id, dp.year, dp.month, e.target.value)} className="w-16 text-center border-2 rounded-lg p-1.5 font-black outline-none focus:ring-1 focus:ring-orange-400 theme-select" />
                                    </td>
@@ -772,29 +771,24 @@ export default function App() {
                 <div className="space-y-8 animate-in fade-in font-bold">
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 font-black">
                     <div className={`p-6 rounded-2xl border-2 shadow-sm space-y-4 ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                        <h3 className="text-lg font-black flex items-center gap-2 italic text-orange-500"><Tag size={20} /> {editingGroup ? 'Editar Grupo' : 'Novo Grupo'}</h3>
+                        <h3 className="text-lg font-black flex items-center gap-2 italic text-orange-500"><Tag size={20} /> Novo Grupo</h3>
                         <input type="text" placeholder="Nome" className="w-full p-3 rounded-xl outline-none uppercase font-black border-2 theme-input" value={newGroupData.name} onChange={e => setNewGroupData({...newGroupData, name: e.target.value.toUpperCase()})} />
                         <div className="flex gap-2">
                             <input type="color" className="w-12 h-10 border-none bg-transparent" value={newGroupData.color} onChange={e => setNewGroupData({...newGroupData, color: e.target.value})} />
-                            <button onClick={handleSaveGroup} className="flex-1 bg-orange-600 text-white rounded-xl text-xs uppercase font-black hover:bg-orange-500 transition-all shadow-md border-2 border-transparent">Salvar</button>
+                            <button onClick={handleSaveGroup} className="flex-1 bg-orange-600 text-white rounded-xl text-xs uppercase font-black hover:bg-orange-500 transition-all border-2 border-transparent">Salvar</button>
                         </div>
                     </div>
                     <div className={`lg:col-span-2 p-6 rounded-2xl border-2 shadow-sm ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                        <h3 className="text-[10px] uppercase mb-4 font-black text-slate-500">Grupos Cadastrados</h3>
-                        <div className="flex flex-wrap gap-4">{groups.map(g => (<div key={g.id} className={`flex items-center gap-3 px-4 py-3 rounded-2xl border-2 group transition-all font-black ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200 hover:border-orange-500 shadow-sm'}`}>
-                            <div className="w-4 h-4 rounded-full shadow-inner" style={{ backgroundColor: g.color }} /><span className={isDark ? 'text-white' : 'text-slate-900'}>{g.name}</span>
-                            <div className="flex gap-2 ml-4">
-                                <button onClick={() => handleEditGroup(g)} className="text-blue-600 hover:scale-110 transition-transform"><Edit2 size={16}/></button>
-                                <button onClick={() => deleteGroup(g.id)} className="text-red-500 hover:scale-110 transition-transform"><Trash2 size={16}/></button>
-                            </div>
-                        </div>))}</div>
+                        <h3 className="text-[10px] uppercase mb-4 font-black text-slate-500">Grupos</h3>
+                        <div className="flex flex-wrap gap-4">{groups.map(g => (<div key={g.id} className="flex items-center gap-3 px-4 py-3 rounded-2xl border-2 font-black theme-select"><div className="w-4 h-4 rounded-full shadow-inner" style={{ backgroundColor: g.color }} /><span>{g.name}</span><div className="flex gap-2 ml-4"><button onClick={() => handleEditGroup(g)} className="text-blue-600"><Edit2 size={16}/></button><button onClick={() => deleteGroup(g.id)} className="text-red-500"><Trash2 size={16}/></button></div></div>))}</div>
                     </div>
                   </div>
                   <div className={`rounded-2xl border-2 shadow-sm overflow-hidden ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
-                    <div className={`p-6 border-b-2 flex justify-between items-center ${isDark ? 'border-slate-800' : 'border-slate-200'}`}><h3 className="text-xl font-black uppercase italic text-orange-500">Catálogo</h3><button onClick={() => handleOpenProductModal()} className="bg-orange-500 text-white px-6 py-2.5 rounded-xl text-xs font-black shadow-lg uppercase flex items-center gap-2 hover:bg-orange-600 transition-all border-2 border-transparent high-contrast-text"><Plus size={18} /> Novo Produto</button></div>
+                    <div className={`p-6 border-b-2 flex justify-between items-center ${isDark ? 'border-slate-800' : 'border-slate-200'}`}><h3 className="text-xl font-black uppercase italic text-orange-500">Catálogo (Arraste para Ordenar)</h3><button onClick={() => handleOpenProductModal()} className="bg-orange-500 text-white px-6 py-2.5 rounded-xl text-xs font-black shadow-lg uppercase flex items-center gap-2 hover:bg-orange-600 border-2 border-transparent high-contrast-text"><Plus size={18} /> Novo Produto</button></div>
                     <table className="w-full text-left font-black border-collapse">
                         <thead className="uppercase text-[10px] font-black table-header-dark text-white">
                             <tr>
+                                <th className="p-5 high-contrast-text w-12 text-center">#</th>
                                 <th className="p-5 high-contrast-text">Cód</th>
                                 <th className="high-contrast-text">Descrição</th>
                                 <th className="text-center high-contrast-text">Grupo</th>
@@ -802,17 +796,25 @@ export default function App() {
                             </tr>
                         </thead>
                         <tbody className={`divide-y-2 ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
-                            {dashboardFilteredData.map(p => (
-                                <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black">
+                            {dashboardFilteredData.map((p, idx) => (
+                                <tr 
+                                  key={p.id} 
+                                  draggable 
+                                  onDragStart={() => onDragStart(idx)}
+                                  onDragOver={onDragOver}
+                                  onDrop={() => onDrop(idx)}
+                                  className="hover:bg-blue-500/5 transition-colors font-black drag-row"
+                                >
+                                    <td className="p-4 text-slate-400 text-center"><GripVertical size={16} /></td>
                                     <td className={`p-6 border-l-4 font-black ${isDark ? 'text-slate-300' : 'text-slate-900'}`} style={{ borderLeftColor: p.groupInfo.color }}>{p.cod}</td>
                                     <td className={`font-black uppercase text-xs ${isDark ? 'text-slate-300' : 'text-slate-900'}`}>{p.desc}</td>
                                     <td className="text-center font-bold">
                                         <span className="px-3 py-1 rounded-lg text-[10px] uppercase border-2 font-black" style={{ color: p.groupInfo.color, borderColor: p.groupInfo.color + '40' }}>{p.groupInfo.name}</span>
                                     </td>
                                     <td className="text-center font-black">
-                                        <div className="flex justify-center gap-4 font-black">
-                                            <button onClick={() => handleOpenProductModal(p)} className="p-2 text-blue-600 hover:scale-125 transition-transform"><Edit2 size={18}/></button>
-                                            <button onClick={() => { setProductToDelete(p); setIsDeleteModalOpen(true); }} className="p-2 text-red-500 hover:scale-125 transition-transform"><Trash2 size={18}/></button>
+                                        <div className="flex justify-center gap-4">
+                                            <button onClick={() => handleOpenProductModal(p)} className="p-2 text-blue-600"><Edit2 size={18}/></button>
+                                            <button onClick={() => { setProductToDelete(p); setIsDeleteModalOpen(true); }} className="p-2 text-red-500"><Trash2 size={18}/></button>
                                         </div>
                                     </td>
                                 </tr>
@@ -827,7 +829,7 @@ export default function App() {
         </>
       )}
 
-      {/* MODAIS (MANTIDOS E FUNCIONAIS) */}
+      {/* Modais */}
       {isPeriodModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in zoom-in-95 font-black">
           <div className={`rounded-3xl shadow-2xl w-full max-w-md p-8 border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
@@ -841,24 +843,13 @@ export default function App() {
         </div>
       )}
 
-      {isPeriodDeleteModalOpen && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm font-black animate-in fade-in">
-          <div className={`rounded-3xl shadow-2xl w-full max-sm p-10 text-center border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
-            <AlertTriangle className="mx-auto text-red-600 mb-4 animate-bounce" size={48} />
-            <h3 className="text-xl font-black uppercase mb-8 text-red-500">Excluir Período?</h3>
-            <p className={`mb-8 font-black ${isDark ? 'text-slate-400' : 'text-slate-900'}`}>Deseja remover o mês <span className="underline">{MONTH_NAMES[periodToDelete?.month]} / {periodToDelete?.year}</span>?</p>
-            <div className="flex gap-3"><button onClick={() => setIsPeriodDeleteModalOpen(false)} className="flex-1 py-3 border-2 rounded-xl uppercase font-black theme-select">Não</button><button onClick={confirmDeletePeriod} className="flex-1 py-3 bg-red-600 text-white rounded-xl uppercase font-black shadow-lg border-2 border-transparent high-contrast-text">Confirmar</button></div>
-          </div>
-        </div>
-      )}
-
       {isLogoutModalOpen && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-sm font-black">
           <div className={`rounded-3xl shadow-2xl w-full max-sm p-10 text-center border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
              <div className="inline-flex p-5 bg-red-100 text-red-600 rounded-full mb-6 border-2 border-red-200"><LogOut size={48}/></div>
              <h3 className="text-2xl font-black uppercase italic mb-2">Sair do Sistema?</h3>
              <p className={`mb-8 font-black ${isDark ? 'text-slate-400' : 'text-slate-900'}`}>Tem certeza de que deseja encerrar a sessão?</p>
-             <div className="flex gap-4"><button onClick={() => setIsLogoutModalOpen(false)} className="flex-1 py-4 border-2 rounded-2xl uppercase font-black theme-select">Voltar</button><button onClick={confirmLogout} className="flex-1 py-4 bg-red-600 text-white rounded-2xl uppercase font-black border-2 border-transparent high-contrast-text">Sair Agora</button></div>
+             <div className="flex gap-4"><button onClick={() => setIsLogoutModalOpen(false)} className={`flex-1 py-4 border-2 rounded-2xl uppercase font-black theme-select`}>Voltar</button><button onClick={confirmLogout} className="flex-1 py-4 bg-red-600 text-white rounded-2xl uppercase font-black border-2 border-transparent high-contrast-text">Sair Agora</button></div>
           </div>
         </div>
       )}
@@ -877,27 +868,21 @@ export default function App() {
         </div>
       )}
 
-      {isDeleteModalOpen && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm font-black animate-in fade-in">
-          <div className={`rounded-3xl shadow-2xl w-full max-sm p-10 text-center border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
+      {/* Modais de Exclusão */}
+      {[
+        { open: isDeleteModalOpen, setOpen: setIsDeleteModalOpen, confirm: confirmDeleteProduct, title: "Excluir Permanente?", body: `Remover ${productToDelete?.cod}?` },
+        { open: isOrderDeleteModalOpen, setOpen: setIsOrderDeleteModalOpen, confirm: confirmDeleteOrder, title: "Excluir Lote?", body: `Remover lote ${orderToDelete?.order_num}?` },
+        { open: isPeriodDeleteModalOpen, setOpen: setIsPeriodDeleteModalOpen, confirm: confirmDeletePeriod, title: "Excluir Período?", body: `Remover mês ${MONTH_NAMES[periodToDelete?.month]} / ${periodToDelete?.year}?` }
+      ].map((m, i) => m.open && (
+        <div key={i} className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm font-black animate-in fade-in">
+          <div className={`rounded-3xl shadow-2xl w-full max-sm p-10 text-center border-2 ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 text-slate-900'}`}>
             <AlertTriangle className="mx-auto text-red-600 mb-4 animate-bounce" size={48} />
-            <h3 className="text-xl font-black uppercase mb-8 text-red-500">Excluir Permanente?</h3>
-            <p className={`mb-8 font-black ${isDark ? 'text-slate-400' : 'text-slate-900'}`}>Deseja remover <span className="underline">{productToDelete?.cod}</span>?</p>
-            <div className="flex gap-3"><button onClick={() => setIsDeleteModalOpen(false)} className="flex-1 py-3 border-2 rounded-xl uppercase font-black theme-select">Não</button><button onClick={confirmDeleteProduct} className="flex-1 py-3 bg-red-600 text-white rounded-xl uppercase font-black shadow-lg border-2 border-transparent high-contrast-text">Deletar</button></div>
+            <h3 className="text-xl font-black uppercase mb-8 text-red-500">{m.title}</h3>
+            <p className="mb-8 font-black">{m.body}</p>
+            <div className="flex gap-3"><button onClick={() => m.setOpen(false)} className="flex-1 py-3 border-2 rounded-xl uppercase font-black theme-select">Não</button><button onClick={m.confirm} className="flex-1 py-3 bg-red-600 text-white rounded-xl uppercase font-black shadow-lg border-2 border-transparent high-contrast-text">Deletar</button></div>
           </div>
         </div>
-      )}
-
-      {isOrderDeleteModalOpen && (
-        <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm font-black animate-in fade-in">
-          <div className={`rounded-3xl shadow-2xl w-full max-sm p-10 text-center border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
-            <AlertTriangle className="mx-auto text-red-600 mb-4 animate-bounce" size={48} />
-            <h3 className="text-xl font-black uppercase mb-8 text-red-500">Excluir Lote?</h3>
-            <p className={`mb-8 font-black ${isDark ? 'text-slate-400' : 'text-slate-900'}`}>Deseja remover o lote <span className="underline">{orderToDelete?.order_num}</span>?</p>
-            <div className="flex gap-3"><button onClick={() => setIsOrderDeleteModalOpen(false)} className="flex-1 py-3 border-2 rounded-xl uppercase font-black theme-select">Não</button><button onClick={confirmDeleteOrder} className="flex-1 py-3 bg-red-600 text-white rounded-xl uppercase font-black shadow-lg border-2 border-transparent high-contrast-text">Deletar</button></div>
-          </div>
-        </div>
-      )}
+      ))}
     </div>
   );
 }
