@@ -111,11 +111,11 @@ export default function App() {
   const [dashRangeStart, setDashRangeStart] = useState({ month: 0, year: CURRENT_YEAR });
   const [dashRangeEnd, setDashRangeEnd] = useState({ month: 11, year: CURRENT_YEAR });
 
-  // Purchase Filters
+  // Purchase Filters (Padrão Ano Atual)
   const [purchaseFilterYear, setPurchaseFilterYear] = useState(CURRENT_YEAR);
   const [purchaseSearch, setPurchaseSearch] = useState('');
 
-  // UI Control
+  // UI Control (Vendas Padrão Ano Atual)
   const [selectedYears, setSelectedYears] = useState([CURRENT_YEAR]); 
   const [filterMode, setFilterMode] = useState('manual'); 
   const [rangeStart, setRangeStart] = useState({ month: 0, year: CURRENT_YEAR });
@@ -233,6 +233,10 @@ export default function App() {
     if (!user) return;
     const pid = `p-${newPeriod.month}-${newPeriod.year}`;
     await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'salesPeriods', pid), newPeriod);
+    // Garantir que o ano do novo período esteja visível se o filtro for manual
+    if (filterMode === 'manual' && !selectedYears.includes(newPeriod.year)) {
+        setSelectedYears([...selectedYears, newPeriod.year]);
+    }
     setIsPeriodModalOpen(false);
   };
 
@@ -242,7 +246,8 @@ export default function App() {
 
   const addNewOrder = async () => {
     if (!user) return;
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', `order-${Date.now()}`), { order_num: (purchaseOrders.length + 1).toString(), order_date: '', arrival_date: '', invoice: '' });
+    const orderId = `order-${Date.now()}`;
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', orderId), { order_num: (purchaseOrders.length + 1).toString(), order_date: '', arrival_date: '', invoice: '' });
   };
 
   const handleEditGroup = (g) => { setEditingGroup(g); setNewGroupData({ name: g.name, color: g.color }); };
@@ -314,31 +319,39 @@ export default function App() {
   }, [sortedPeriods, dashFilterMode, dashRangeStart, dashRangeEnd, dashFilterYear]);
 
   const filteredPurchaseOrders = useMemo(() => {
-    // Novas colunas (mais recentes) sempre à direita (crescente por numeração)
-    let res = [...(purchaseOrders || [])].sort((a,b) => (a?.order_num || "").localeCompare(b?.order_num || "", undefined, {numeric: true}));
+    // Novas colunas (mais recentes) sempre à direita (crescente cronológico/ID)
+    return [...(purchaseOrders || [])].sort((a,b) => (a?.id || "").localeCompare(b?.id || ""));
+  }, [purchaseOrders]);
+
+  const purchaseOrdersInView = useMemo(() => {
+    let res = filteredPurchaseOrders;
     if (purchaseFilterYear !== 'Todos') res = res.filter(o => String(o?.order_date || "").startsWith(purchaseFilterYear));
     if (purchaseSearch) {
       const low = purchaseSearch.toLowerCase();
       res = res.filter(o => (o?.order_num || "").toLowerCase().includes(low) || (o?.invoice || "").toLowerCase().includes(low));
     }
     return res;
-  }, [purchaseOrders, purchaseFilterYear, purchaseSearch]);
+  }, [filteredPurchaseOrders, purchaseFilterYear, purchaseSearch]);
 
   const processedDataList = useMemo(() => {
     if (!products) return [];
+    // IDs de todas as ordens e períodos que EXISTEM no sistema
     const activeOrderIds = new Set(purchaseOrders.map(o => o.id));
     const activePeriods = salesPeriods.map(p => ({ y: String(p.year), m: p.month }));
 
+    // --- ORDENAÇÃO SOBERANA ---
     const sortedProducts = [...products].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
 
     return sortedProducts.map(p => {
       const groupInfo = groups.find(g => g.id === p.groupId) || { name: 'Sem Grupo', color: '#94a3b8' };
       
+      // Compras totais considerando APENAS os lotes que existem atualmente
       const totalPurchases = Object.entries(p?.purchases_map || {}).reduce((acc, [orderId, qty]) => {
         if (activeOrderIds.has(orderId)) return acc + (parseInt(qty) || 0);
         return acc;
       }, 0);
 
+      // Vendas totais considerando APENAS os meses que existem atualmente
       const totalSales = activePeriods.reduce((acc, period) => {
         const val = p?.sales?.[period.y]?.[period.m] || 0;
         return acc + (parseInt(val) || 0);
@@ -500,7 +513,7 @@ export default function App() {
               <div className="flex items-center gap-6">
                 <div className="relative w-64 font-black">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-                  <input type="text" placeholder="Busca inteligente..." className="w-full pl-10 pr-4 py-2 rounded-full text-sm outline-none transition-all theme-input focus:ring-1 focus:ring-orange-400" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
+                  <input type="text" placeholder="Busca inteligente..." className={`w-full pl-10 pr-4 py-2 rounded-full text-sm outline-none transition-all theme-input focus:ring-1 focus:ring-orange-400`} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
                 </div>
                 <button onClick={toggleTheme} className={`p-2 rounded-full transition-all ${isDark ? 'bg-slate-800 text-yellow-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
                     {isDark ? <Sun size={20}/> : <Moon size={20}/>}
@@ -562,12 +575,12 @@ export default function App() {
                         <Tooltip contentStyle={{ borderRadius: '16px', border: 'none', backgroundColor: isDark ? '#0f172a' : '#fff', color: isDark ? '#fff' : '#000' }} />
                         <Legend verticalAlign="top" align="right" wrapperStyle={{fontSize: '10px'}} />
                         <Bar dataKey="value" name="Vendas" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={35} />
-                        <Line type="monotone" dataKey="trend" name="Tendência IA" stroke="#f97316" strokeWidth={2} dot={false} strokeDasharray="5 5" />
+                        <Line type="monotone" dataKey="trend" name="Tendência IA" stroke="#f97316" strokeWidth={2.5} dot={false} strokeDasharray="5 5" />
                       </ComposedChart>
                     </ResponsiveContainer>
                   </div>
 
-                  {/* TABELA DE INTELIGÊNCIA RESTAURADA */}
+                  {/* TABELA DE INTELIGÊNCIA COM ORDEM SOBERANA */}
                   <div className={`rounded-3xl border-2 shadow-sm overflow-hidden ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
                       <div className={`p-4 flex items-center gap-2 font-black uppercase text-xs border-b ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-950 text-white'}`}><ListFilter size={18} className="text-orange-500" /> Inteligência de Performance</div>
                       <table className="w-full text-xs text-left font-black">
@@ -583,7 +596,7 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className={`divide-y ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
-                          {dashboardFilteredData.sort((a,b) => (b.turnoverPerc || 0) - (a.turnoverPerc || 0)).map(p => (
+                          {dashboardFilteredData.map(p => (
                             <tr key={p.id} className={`${p.turnoverPerc >= 80 ? isDark ? 'bg-orange-500/5' : 'bg-orange-50' : p.stock <= 0 ? isDark ? 'bg-red-500/5' : 'bg-red-50' : ''} transition-all group`}>
                               <td className="p-4 border-l-4 font-black" style={{ borderLeftColor: p.groupInfo.color }}>
                                   <div className={isDark ? 'text-white' : 'text-slate-900'}>{p.cod}</div>
@@ -628,7 +641,7 @@ export default function App() {
                           <input type="text" placeholder="Busca de Lote / NF..." className="pl-10 pr-4 py-2 rounded-xl text-xs font-black border-2 outline-none theme-select focus:border-orange-500 transition-all" value={purchaseSearch} onChange={e => setPurchaseSearch(e.target.value)} />
                         </div>
                       </div>
-                      <button onClick={addNewOrder} className="bg-blue-600 text-white px-6 py-2.5 rounded-xl text-xs font-black uppercase shadow-lg hover:bg-blue-700 active:scale-95 border-2 border-transparent flex items-center gap-2"><Plus size={16} /> Novo Lote</button>
+                      <button onClick={addNewOrder} className="bg-blue-600 text-white px-6 py-2.5 rounded-xl text-xs font-black uppercase shadow-lg hover:bg-blue-700 active:scale-95 transition-all border-2 border-transparent flex items-center gap-2"><Plus size={16} /> Novo Lote</button>
                     </div>
 
                     <div className={`rounded-2xl border-2 shadow-xl overflow-hidden font-black ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -637,8 +650,8 @@ export default function App() {
                           <thead className="uppercase text-[10px] font-black table-header-dark text-white">
                             <tr className="border-b border-slate-700">
                               <th className="p-4 text-left bg-[#0f172a] text-blue-400 sticky left-0 z-20 font-black min-w-[200px] high-contrast-text">Nº COMPRA:</th>
-                              {filteredPurchaseOrders.map(o => (
-                                <th className="p-4 text-center bg-orange-600 text-white border-l border-orange-700 group relative min-w-[140px] font-black" key={o.id}>
+                              {purchaseOrdersInView.map(o => (
+                                <th className="p-4 text-center bg-orange-500 text-white border-l border-orange-700 group relative min-w-[140px] font-black" key={o.id}>
                                   <input className="w-full bg-transparent text-center outline-none font-black text-lg high-contrast-text" value={o.order_num || ''} onChange={e => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', o.id), {order_num: e.target.value})} />
                                   <button onClick={() => { setOrderToDelete(o); setIsOrderDeleteModalOpen(true); }} className="opacity-0 group-hover:opacity-100 absolute top-1 right-1 transition-opacity"><Trash2 size={12} /></button>
                                 </th>
@@ -648,7 +661,7 @@ export default function App() {
                             {['order_date', 'arrival_date', 'invoice'].map((f) => (
                               <tr key={f} className="border-b border-slate-700">
                                 <th className={`p-3 text-left font-black sticky left-0 z-20 uppercase tracking-tighter bg-[#0f172a] text-white/80 high-contrast-text`}>{f === 'order_date' ? 'PEDIDO' : f === 'arrival_date' ? 'CHEGADA' : 'NF'}</th>
-                                {filteredPurchaseOrders.map(o => (
+                                {purchaseOrdersInView.map(o => (
                                   <th key={o.id} className="p-2 border-l border-slate-700 font-black bg-slate-800/40">
                                     <input type={f.includes('date') ? 'date' : 'text'} className="w-full bg-transparent text-center font-black text-[10px] text-white uppercase outline-none high-contrast-text" value={o[f] || ''} onChange={e => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', o.id), {[f]: e.target.value})} />
                                   </th>
@@ -658,9 +671,9 @@ export default function App() {
                           </thead>
                           <tbody className={`divide-y-2 ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
                             {dashboardFilteredData.map(p => (
-                              <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black">
+                              <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black table-row-hover">
                                 <td className={`p-4 sticky left-0 z-10 border-r-2 border-l-4 font-black ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`} style={{ borderLeftColor: p.groupInfo.color }}>{p.cod}</td>
-                                {filteredPurchaseOrders.map(o => (
+                                {purchaseOrdersInView.map(o => (
                                   <td key={o.id} className="p-2 border-l border-slate-200/10 text-center font-black">
                                     <input type="number" min="0" value={p?.purchases_map?.[o.id] || 0} onChange={(e) => updatePurchaseQty(p.id, o.id, e.target.value)} className="w-16 text-center rounded-lg border-2 font-black text-blue-600 outline-none theme-select" />
                                   </td>
@@ -688,6 +701,19 @@ export default function App() {
                          {filterMode === 'manual' && (
                            <select className="p-2 rounded-xl text-xs font-black border-2 outline-none theme-select" value={selectedYears[0]} onChange={e => setSelectedYears([e.target.value])}>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}</select>
                          )}
+                         {filterMode === 'range' && (
+                           <div className="flex items-center gap-2">
+                             <div className="flex gap-1">
+                               <select className={`p-2 rounded-xl text-[10px] font-black border-2 outline-none theme-select`} value={rangeStart.month} onChange={e => setRangeStart({...rangeStart, month: parseInt(e.target.value)})}>{MONTH_NAMES.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
+                               <select className={`p-2 rounded-xl text-[10px] font-black border-2 outline-none theme-select`} value={rangeStart.year} onChange={e => setRangeStart({...rangeStart, year: e.target.value})}>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}</select>
+                             </div>
+                             <span className="text-slate-400">até</span>
+                             <div className="flex gap-1">
+                               <select className={`p-2 rounded-xl text-[10px] font-black border-2 outline-none theme-select`} value={rangeEnd.month} onChange={e => setRangeEnd({...rangeEnd, month: parseInt(e.target.value)})}>{MONTH_NAMES.map((m, i) => <option key={i} value={i}>{m}</option>)}</select>
+                               <select className={`p-2 rounded-xl text-[10px] font-black border-2 outline-none theme-select`} value={rangeEnd.year} onChange={e => setRangeEnd({...rangeEnd, year: e.target.value})}>{YEARS_LIST.map(y => <option key={y} value={y}>{y}</option>)}</select>
+                             </div>
+                           </div>
+                         )}
                        </div>
                        <button onClick={() => setIsPeriodModalOpen(true)} className="bg-orange-500 text-white px-5 py-2 rounded-xl text-xs flex items-center gap-2 font-black uppercase hover:bg-orange-600 transition-all shadow-lg border-2 border-transparent"><PlusSquare size={16}/> Novo Mês</button>
                      </div>
@@ -713,7 +739,7 @@ export default function App() {
                            {dashboardFilteredData.map(p => {
                              const totalFilteredSales = displayedPeriodsInSalesTable.reduce((acc, dp) => acc + (parseInt(p?.sales?.[dp.year]?.[dp.month]) || 0), 0);
                              return (
-                               <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black">
+                               <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black table-row-hover">
                                  <td className={`p-4 font-black border-l-4 sticky left-0 z-10 border-r-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`} style={{ borderLeftColor: p.groupInfo.color }}>
                                     <div className="text-sm">{p.cod}</div>
                                     <div className="text-[9px] text-slate-500 italic uppercase font-black truncate max-w-[150px]">{p.desc}</div>
@@ -750,7 +776,7 @@ export default function App() {
                         </thead>
                         <tbody className={`divide-y-2 ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
                             {dashboardFilteredData.map(p => (
-                                <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black">
+                                <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black table-row-hover">
                                     <td className={`px-8 py-6 border-l-4 font-black ${isDark ? 'text-slate-300' : 'text-slate-900'}`} style={{ borderLeftColor: p.groupInfo.color }}>
                                         <div className={isDark ? 'text-white' : 'text-slate-900 text-lg'}>{p.cod}</div>
                                         <span className="text-[10px] uppercase italic text-slate-500 font-bold">{p.desc}</span>
@@ -775,12 +801,12 @@ export default function App() {
                         <input type="text" placeholder="Nome" className="w-full p-3 rounded-xl outline-none uppercase font-black border-2 theme-input" value={newGroupData.name} onChange={e => setNewGroupData({...newGroupData, name: e.target.value.toUpperCase()})} />
                         <div className="flex gap-2">
                             <input type="color" className="w-12 h-10 border-none bg-transparent" value={newGroupData.color} onChange={e => setNewGroupData({...newGroupData, color: e.target.value})} />
-                            <button onClick={handleSaveGroup} className="flex-1 bg-orange-600 text-white rounded-xl text-xs uppercase font-black hover:bg-orange-500 transition-all border-2 border-transparent">Salvar</button>
+                            <button onClick={handleSaveGroup} className="flex-1 bg-orange-600 text-white rounded-xl text-xs uppercase font-black hover:bg-orange-500 transition-all shadow-md border-2 border-transparent">Salvar</button>
                         </div>
                     </div>
                     <div className={`lg:col-span-2 p-6 rounded-2xl border-2 shadow-sm ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
                         <h3 className="text-[10px] uppercase mb-4 font-black text-slate-500">Grupos</h3>
-                        <div className="flex flex-wrap gap-4">{groups.map(g => (<div key={g.id} className="flex items-center gap-3 px-4 py-3 rounded-2xl border-2 font-black theme-select"><div className="w-4 h-4 rounded-full shadow-inner" style={{ backgroundColor: g.color }} /><span>{g.name}</span><div className="flex gap-2 ml-4"><button onClick={() => handleEditGroup(g)} className="text-blue-600"><Edit2 size={16}/></button><button onClick={() => deleteGroup(g.id)} className="text-red-500"><Trash2 size={16}/></button></div></div>))}</div>
+                        <div className="flex flex-wrap gap-4">{groups.map(g => (<div key={g.id} className={`flex items-center gap-3 px-4 py-3 rounded-2xl border-2 group transition-all font-black theme-select`}><div className="w-4 h-4 rounded-full shadow-inner" style={{ backgroundColor: g.color }} /><span>{g.name}</span><div className="flex gap-2 ml-4"><button onClick={() => handleEditGroup(g)} className="text-blue-600"><Edit2 size={16}/></button><button onClick={() => deleteGroup(g.id)} className="text-red-500"><Trash2 size={16}/></button></div></div>))}</div>
                     </div>
                   </div>
                   <div className={`rounded-2xl border-2 shadow-sm overflow-hidden ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -829,7 +855,7 @@ export default function App() {
         </>
       )}
 
-      {/* Modais */}
+      {/* Modais de Exclusão e Período */}
       {isPeriodModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in zoom-in-95 font-black">
           <div className={`rounded-3xl shadow-2xl w-full max-w-md p-8 border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
