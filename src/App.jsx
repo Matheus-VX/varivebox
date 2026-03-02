@@ -15,7 +15,7 @@ import {
   Trash2, X, PlusSquare, Settings2, Tag, ArrowRightLeft, Loader2,
   AlertCircle, Zap, BarChart3, ListFilter, Activity, LineChart as LineChartIcon,
   TrendingDown, Star, Info, Eye, EyeOff, Lock, User, Rocket, LogOut, Sun, Moon,
-  GripVertical
+  GripVertical, Pin, Ghost
 } from 'lucide-react';
 import { 
   Line, XAxis, YAxis, CartesianGrid, Tooltip, 
@@ -123,6 +123,10 @@ export default function App() {
   const [searchTerm, setSearchTerm] = useState('');
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [draggedItemIdx, setDraggedItemIdx] = useState(null);
+
+  // Marcadores Privados (Tarrachas)
+  const [markers, setMarkers] = useState([]);
+  const [isDraggingMarker, setIsDraggingMarker] = useState(false);
 
   // Modals
   const [editingProduct, setEditingProduct] = useState(null);
@@ -232,8 +236,7 @@ export default function App() {
   const handleAddPeriod = async () => {
     if (!user) return;
     const pid = `p-${newPeriod.month}-${newPeriod.year}`;
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'salesPeriods', pid), newPeriod);
-    // Garantir que o ano do novo período esteja visível se o filtro for manual
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'salesPeriods', pid), { ...newPeriod, isGhost: false });
     if (filterMode === 'manual' && !selectedYears.includes(newPeriod.year)) {
         setSelectedYears([...selectedYears, newPeriod.year]);
     }
@@ -247,12 +250,22 @@ export default function App() {
   const addNewOrder = async () => {
     if (!user) return;
     const orderId = `order-${Date.now()}`;
-    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', orderId), { order_num: (purchaseOrders.length + 1).toString(), order_date: '', arrival_date: '', invoice: '' });
+    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', orderId), { order_num: (purchaseOrders.length + 1).toString(), order_date: '', arrival_date: '', invoice: '', isGhost: false });
   };
 
   const handleEditGroup = (g) => { setEditingGroup(g); setNewGroupData({ name: g.name, color: g.color }); };
 
-  // --- DRAG & DROP ---
+  const toggleOrderGhost = async (id, currentIsGhost) => {
+    if (!user) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', id), { isGhost: !currentIsGhost });
+  };
+
+  const togglePeriodGhost = async (id, currentIsGhost) => {
+    if (!user) return;
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'salesPeriods', id), { isGhost: !currentIsGhost });
+  };
+
+  // --- DRAG & DROP PRODUTOS ---
   const onDragStart = (idx) => setDraggedItemIdx(idx);
   const onDragOver = (e) => e.preventDefault();
   const onDrop = async (targetIdx) => {
@@ -268,6 +281,66 @@ export default function App() {
     });
     await batch.commit();
     setDraggedItemIdx(null);
+  };
+
+  // --- LÓGICA DE TARRHACHAS (MARCADORES FIXOS NO SCROLL) ---
+  const addMarker = () => {
+    const container = document.getElementById('scrollable-content');
+    const scrollY = container ? container.scrollTop : 0;
+    const scrollX = container ? container.scrollLeft : 0;
+    const newMarker = {
+      id: Date.now(),
+      x: 300 + scrollX, // Posicionado dentro da área visível atual
+      y: 200 + scrollY,
+      tab: activeTab
+    };
+    setMarkers([...markers, newMarker]);
+  };
+
+  const removeMarker = (id) => {
+    setMarkers(markers.filter(m => m.id !== id));
+  };
+
+  const handleMarkerDragStart = (e, id) => {
+    setIsDraggingMarker(true);
+    const marker = markers.find(m => m.id === id);
+    const container = document.getElementById('scrollable-content');
+    
+    let rect = { left: 0, top: 0 };
+    let scroll = { left: 0, top: 0 };
+    
+    if (container) {
+       rect = container.getBoundingClientRect();
+       scroll = { left: container.scrollLeft, top: container.scrollTop };
+    }
+
+    const startMouseX = e.clientX - rect.left + scroll.left;
+    const startMouseY = e.clientY - rect.top + scroll.top;
+
+    const offset = {
+      x: startMouseX - marker.x,
+      y: startMouseY - marker.y
+    };
+
+    const handleMouseMove = (moveEvent) => {
+      // Usamos o scroll atual durante o arraste caso o utilizador esteja rolando a roda do rato
+      const currentScroll = container ? { left: container.scrollLeft, top: container.scrollTop } : scroll;
+      const currentMouseX = moveEvent.clientX - rect.left + currentScroll.left;
+      const currentMouseY = moveEvent.clientY - rect.top + currentScroll.top;
+
+      setMarkers(prev => prev.map(m => 
+        m.id === id ? { ...m, x: currentMouseX - offset.x, y: currentMouseY - offset.y } : m
+      ));
+    };
+
+    const handleMouseUp = () => {
+      setIsDraggingMarker(false);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
   };
 
   // --- SINCRONIZAÇÃO FIREBASE ---
@@ -319,7 +392,6 @@ export default function App() {
   }, [sortedPeriods, dashFilterMode, dashRangeStart, dashRangeEnd, dashFilterYear]);
 
   const filteredPurchaseOrders = useMemo(() => {
-    // Novas colunas (mais recentes) sempre à direita (crescente cronológico/ID)
     return [...(purchaseOrders || [])].sort((a,b) => (a?.id || "").localeCompare(b?.id || ""));
   }, [purchaseOrders]);
 
@@ -335,23 +407,20 @@ export default function App() {
 
   const processedDataList = useMemo(() => {
     if (!products) return [];
-    // IDs de todas as ordens e períodos que EXISTEM no sistema
-    const activeOrderIds = new Set(purchaseOrders.map(o => o.id));
-    const activePeriods = salesPeriods.map(p => ({ y: String(p.year), m: p.month }));
+    
+    const activeOrderIds = new Set(purchaseOrders.filter(o => !o.isGhost).map(o => o.id));
+    const activePeriods = salesPeriods.filter(p => !p.isGhost).map(p => ({ y: String(p.year), m: p.month }));
 
-    // --- ORDENAÇÃO SOBERANA ---
     const sortedProducts = [...products].sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
 
     return sortedProducts.map(p => {
       const groupInfo = groups.find(g => g.id === p.groupId) || { name: 'Sem Grupo', color: '#94a3b8' };
       
-      // Compras totais considerando APENAS os lotes que existem atualmente
       const totalPurchases = Object.entries(p?.purchases_map || {}).reduce((acc, [orderId, qty]) => {
         if (activeOrderIds.has(orderId)) return acc + (parseInt(qty) || 0);
         return acc;
       }, 0);
 
-      // Vendas totais considerando APENAS os meses que existem atualmente
       const totalSales = activePeriods.reduce((acc, period) => {
         const val = p?.sales?.[period.y]?.[period.m] || 0;
         return acc + (parseInt(val) || 0);
@@ -361,7 +430,8 @@ export default function App() {
       const turnoverPerc = totalPurchases > 0 ? (totalSales / totalPurchases) * 100 : 0;
 
       const getMetrics = (n) => {
-        const lastN = sortedPeriods.slice(-n);
+        const nonGhostPeriods = sortedPeriods.filter(p => !p.isGhost);
+        const lastN = nonGhostPeriods.slice(-n);
         const winSumVal = lastN.reduce((s, pr) => s + (parseInt(p?.sales?.[pr.year]?.[pr.month]) || 0), 0);
         return { units: winSumVal, perc: totalSales > 0 ? ((winSumVal / totalSales) * 100).toFixed(0) : 0 };
       };
@@ -372,7 +442,7 @@ export default function App() {
       const recommendation = stock <= 0 ? "CRÍTICO" : turnoverPerc >= 80 ? "URGENTE" : turnoverPerc >= 50 ? "ALERTA" : "OK";
       const recColor = stock <= 0 ? "bg-red-600 text-white animate-pulse" : turnoverPerc >= 80 ? "bg-orange-500 text-white" : turnoverPerc >= 50 ? "bg-yellow-400 text-black" : (isDark ? "bg-green-500/20 text-green-400" : "bg-green-100 text-green-700");
       
-      const freq = activeMCount / (salesPeriods?.length || 1);
+      const freq = activeMCount / (salesPeriods.filter(sp => !sp.isGhost).length || 1);
       const constLabel = freq >= 0.8 ? "Mensal" : freq >= 0.4 ? "Trimestral" : freq >= 0.2 ? "Semestral" : "Inativo";
       const constClr = freq >= 0.8 ? "text-blue-500" : freq >= 0.4 ? "text-green-500" : freq >= 0.2 ? "text-yellow-600" : "text-red-500 font-black italic";
 
@@ -399,7 +469,10 @@ export default function App() {
     const data = dashboardFilteredData || [];
     const est = data.reduce((a, b) => a + (b?.stock || 0), 0);
     const ven = data.reduce((accProd, p) => {
-      return accProd + (dashPeriods || []).reduce((accP, dp) => accP + (parseInt(p?.sales?.[dp.year]?.[dp.month]) || 0), 0);
+      return accProd + (dashPeriods || []).reduce((accP, dp) => {
+          if (dp.isGhost) return accP;
+          return accP + (parseInt(p?.sales?.[dp.year]?.[dp.month]) || 0);
+      }, 0);
     }, 0);
     const urg = data.filter(p => (p?.turnoverPerc || 0) >= 80 || (p?.stock || 0) <= 0);
     const slow = data.filter(p => p?.totalSales === 0 && p?.totalPurchases > 0);
@@ -408,7 +481,8 @@ export default function App() {
   }, [dashboardFilteredData, dashPeriods]);
 
   const chartResults = useMemo(() => {
-    const dataPoints = (dashPeriods || []).map((period, index) => {
+    const nonGhostPeriods = (dashPeriods || []).filter(p => !p.isGhost);
+    const dataPoints = nonGhostPeriods.map((period, index) => {
         let sum = 0;
         dashboardFilteredData.forEach(prod => { sum += (parseInt(prod?.sales?.[period.year]?.[period.month]) || 0); });
         return { label: `${MONTH_NAMES[period.month]}/${String(period.year).slice(-2)}`, value: sum, x: index };
@@ -456,6 +530,13 @@ export default function App() {
         .custom-scrollbar::-webkit-scrollbar-thumb { background: #64748b; border-radius: 10px; }
         .drag-row { cursor: grab; transition: all 0.2s; }
         .drag-row:active { cursor: grabbing; opacity: 0.5; background: #e2e8f0; transform: scale(0.99); }
+        .marker-pin { 
+          position: absolute; /* Mudado para absolute para acompanhar o scroll nativamente */
+          z-index: 60; 
+          cursor: move; 
+          filter: drop-shadow(0 4px 6px rgba(0,0,0,0.4));
+          user-select: none;
+        }
       `}</style>
 
       {!user ? (
@@ -515,14 +596,37 @@ export default function App() {
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                   <input type="text" placeholder="Busca inteligente..." className={`w-full pl-10 pr-4 py-2 rounded-full text-sm outline-none transition-all theme-input focus:ring-1 focus:ring-orange-400`} value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
                 </div>
-                <button onClick={toggleTheme} className={`p-2 rounded-full transition-all ${isDark ? 'bg-slate-800 text-yellow-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
-                    {isDark ? <Sun size={20}/> : <Moon size={20}/>}
-                </button>
+
+                <div className="flex items-center gap-2">
+                  <button onClick={addMarker} title="Adicionar Marcador Visual (Tarracha)" className={`p-2 rounded-full transition-all ${isDark ? 'bg-slate-800 text-yellow-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                      <Pin size={20}/>
+                  </button>
+                  <button onClick={toggleTheme} className={`p-2 rounded-full transition-all ${isDark ? 'bg-slate-800 text-yellow-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                      {isDark ? <Sun size={20}/> : <Moon size={20}/>}
+                  </button>
+                </div>
+
                 <div className={`flex items-center gap-2 px-4 py-2 rounded-full text-[10px] border-2 uppercase font-black ${isDark ? 'bg-slate-800 border-slate-700 text-green-400' : 'bg-green-50 border-green-200 text-green-700'}`}><Clock size={12} /> Cloud ON</div>
               </div>
             </header>
 
-            <div className={`flex-1 overflow-y-auto p-6 space-y-8 transition-colors ${isDark ? 'bg-slate-950' : 'bg-slate-50/50'}`}>
+            {/* Contentor com scroll (onde os marcadores vivem) */}
+            <div id="scrollable-content" className={`relative flex-1 overflow-y-auto p-6 space-y-8 transition-colors ${isDark ? 'bg-slate-950' : 'bg-slate-50/50'}`}>
+              
+              {/* RENDERIZAÇÃO DAS TARRHACHAS APENAS NA ABA ATUAL */}
+              {markers.filter(m => m.tab === activeTab).map(m => (
+                <div 
+                  key={m.id} 
+                  className="marker-pin p-1.5 bg-yellow-400 rounded-full border-2 border-yellow-600 animate-in zoom-in hover:scale-110 hover:bg-yellow-300 transition-transform"
+                  style={{ left: m.x, top: m.y }}
+                  onMouseDown={(e) => handleMarkerDragStart(e, m.id)}
+                  onDoubleClick={() => removeMarker(m.id)}
+                  title="Arraste para mover | Duplo clique para remover"
+                >
+                  <Pin size={24} className="text-yellow-900" />
+                </div>
+              ))}
+
               {activeTab === 'dashboard' && (
                 <div className="space-y-8 animate-in fade-in font-bold">
                   {/* Filtros Dashboard */}
@@ -553,7 +657,7 @@ export default function App() {
                         </div>
                       )}
                       <div className="space-y-1"><span className="text-[9px] uppercase font-black opacity-60">Grupo</span><select className="block text-xs font-black rounded-lg border-2 p-2 outline-none theme-select" value={dashFilterGroup} onChange={e => setDashFilterGroup(e.target.value)}><option value="Todos">Todos os Grupos</option>{groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}</select></div>
-                      <div className="space-y-1"><span className="text-[9px] uppercase font-black opacity-60">Modelo</span><select className="block text-xs font-black rounded-lg border-2 p-2 outline-none theme-select" value={dashFilterModel} onChange={e => setDashFilterModel(e.target.value)}><option value="Todos">Todos os Modelos</option>{products.map(p => <option key={p.id} value={p.id}>{p.cod}</option>)}</select></div>
+                      <div className="space-y-1"><span className="text-[9px] uppercase font-black opacity-60">Modelo</span><select className="block text-xs font-black rounded-lg border-2 p-2 outline-none theme-select" value={dashFilterModel} onChange={e => setDashFilterModel(e.target.value)}><option value="Todos">Todos os Modelos</option>{products.map(p => <option key={p.id} value={p.id}>{p.cod} - {p.desc}</option>)}</select></div>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-4">
@@ -562,7 +666,7 @@ export default function App() {
                     <StatCard title="Urgência" value={dashboardKPIs.urg.length} sub="Giro Crítico" icon={AlertCircle} colorClass="border-orange-500" active={dashboardKPIs.urg.length > 0} tooltipList={dashboardKPIs.urg} isDark={isDark} />
                     <StatCard title="Sem Giro" value={dashboardKPIs.slow.length} sub="Nunca Vendidos" icon={TrendingDown} colorClass="border-slate-400" tooltipList={dashboardKPIs.slow} isDark={isDark} />
                     <StatCard title="Previsão Próx" value={chartResults.forecast} sub="IA Estimativa" icon={Zap} colorClass="border-purple-500 text-purple-500" isDark={isDark} />
-                    <StatCard title="Carro-Chefe" value={dashboardKPIs.top?.cod || "---"} sub="Melhor Saída" icon={Star} colorClass="border-yellow-500 text-yellow-500" isDark={isDark} />
+                    <StatCard title="Carro-Chefe" value={dashboardKPIs.top?.cod || "---"} sub={dashboardKPIs.top?.desc || "Melhor Saída"} icon={Star} colorClass="border-yellow-500 text-yellow-500" isDark={isDark} />
                   </div>
 
                   <div className={`p-8 rounded-3xl border-2 shadow-sm h-[400px] ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
@@ -580,13 +684,13 @@ export default function App() {
                     </ResponsiveContainer>
                   </div>
 
-                  {/* TABELA DE INTELIGÊNCIA COM ORDEM SOBERANA */}
+                  {/* TABELA DE INTELIGÊNCIA COM ORDEM SOBERANA E DESCRIÇÃO */}
                   <div className={`rounded-3xl border-2 shadow-sm overflow-hidden ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
                       <div className={`p-4 flex items-center gap-2 font-black uppercase text-xs border-b ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-950 text-white'}`}><ListFilter size={18} className="text-orange-500" /> Inteligência de Performance</div>
                       <table className="w-full text-xs text-left font-black">
                         <thead className="uppercase text-[10px] font-black table-header-dark text-white">
                           <tr>
-                            <th className="p-4 high-contrast-text">Modelo</th>
+                            <th className="p-4 high-contrast-text">Modelo / Descrição</th>
                             <th className="text-center high-contrast-text">Giro Total %</th>
                             <th className="text-center high-contrast-text">Janela 3m</th>
                             <th className="text-center high-contrast-text">Janela 6m</th>
@@ -597,10 +701,10 @@ export default function App() {
                         </thead>
                         <tbody className={`divide-y ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
                           {dashboardFilteredData.map(p => (
-                            <tr key={p.id} className={`${p.turnoverPerc >= 80 ? isDark ? 'bg-orange-500/5' : 'bg-orange-50' : p.stock <= 0 ? isDark ? 'bg-red-500/5' : 'bg-red-50' : ''} transition-all group`}>
+                            <tr key={p.id} className={`${p.turnoverPerc >= 80 ? isDark ? 'bg-orange-500/5' : 'bg-orange-50' : p.stock <= 0 ? isDark ? 'bg-red-500/5' : 'bg-red-50' : ''} transition-all group table-row-hover`}>
                               <td className="p-4 border-l-4 font-black" style={{ borderLeftColor: p.groupInfo.color }}>
                                   <div className={isDark ? 'text-white' : 'text-slate-900'}>{p.cod}</div>
-                                  <div className="text-[9px] text-slate-500 uppercase font-bold">{p.groupInfo.name}</div>
+                                  <div className="text-[10px] text-slate-500 uppercase font-bold">{p.desc}</div>
                               </td>
                               <td className={`p-4 text-center font-black ${isDark ? 'text-slate-300' : 'text-slate-900'}`}>{p.turnoverPerc.toFixed(1)}%</td>
                               <td className="p-4 text-center">
@@ -649,11 +753,12 @@ export default function App() {
                         <table className="w-full text-sm border-collapse font-black">
                           <thead className="uppercase text-[10px] font-black table-header-dark text-white">
                             <tr className="border-b border-slate-700">
-                              <th className="p-4 text-left bg-[#0f172a] text-blue-400 sticky left-0 z-20 font-black min-w-[200px] high-contrast-text">Nº COMPRA:</th>
+                              <th className="p-4 text-left bg-[#0f172a] text-blue-400 sticky left-0 z-20 font-black min-w-[200px] high-contrast-text">Modelo / Descrição:</th>
                               {purchaseOrdersInView.map(o => (
-                                <th className="p-4 text-center bg-orange-500 text-white border-l border-orange-700 group relative min-w-[140px] font-black" key={o.id}>
+                                <th className={`p-4 text-center text-white border-l border-orange-700 group relative min-w-[140px] font-black ${o.isGhost ? 'bg-slate-700 opacity-60' : 'bg-orange-600'}`} key={o.id}>
                                   <input className="w-full bg-transparent text-center outline-none font-black text-lg high-contrast-text" value={o.order_num || ''} onChange={e => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', o.id), {order_num: e.target.value})} />
-                                  <button onClick={() => { setOrderToDelete(o); setIsOrderDeleteModalOpen(true); }} className="opacity-0 group-hover:opacity-100 absolute top-1 right-1 transition-opacity"><Trash2 size={12} /></button>
+                                  <button onClick={() => toggleOrderGhost(o.id, o.isGhost)} className={`absolute top-1 left-2 transition-opacity ${o.isGhost ? 'opacity-100 text-yellow-400' : 'opacity-0 group-hover:opacity-100 text-white'}`} title="Tornar Fantasma"><Ghost size={12} /></button>
+                                  <button onClick={() => { setOrderToDelete(o); setIsOrderDeleteModalOpen(true); }} className="opacity-0 group-hover:opacity-100 absolute top-1 right-2 transition-opacity"><Trash2 size={12} /></button>
                                 </th>
                               ))}
                               <th rowSpan={4} className="p-4 text-center text-white border-l-2 border-slate-700 bg-[#0f172a] high-contrast-text">TOTAL</th>
@@ -662,7 +767,7 @@ export default function App() {
                               <tr key={f} className="border-b border-slate-700">
                                 <th className={`p-3 text-left font-black sticky left-0 z-20 uppercase tracking-tighter bg-[#0f172a] text-white/80 high-contrast-text`}>{f === 'order_date' ? 'PEDIDO' : f === 'arrival_date' ? 'CHEGADA' : 'NF'}</th>
                                 {purchaseOrdersInView.map(o => (
-                                  <th key={o.id} className="p-2 border-l border-slate-700 font-black bg-slate-800/40">
+                                  <th key={o.id} className={`p-2 border-l border-slate-700 font-black ${o.isGhost ? 'bg-slate-700/60 opacity-60' : 'bg-slate-800/40'}`}>
                                     <input type={f.includes('date') ? 'date' : 'text'} className="w-full bg-transparent text-center font-black text-[10px] text-white uppercase outline-none high-contrast-text" value={o[f] || ''} onChange={e => updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'purchaseOrders', o.id), {[f]: e.target.value})} />
                                   </th>
                                 ))}
@@ -672,9 +777,12 @@ export default function App() {
                           <tbody className={`divide-y-2 ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
                             {dashboardFilteredData.map(p => (
                               <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black table-row-hover">
-                                <td className={`p-4 sticky left-0 z-10 border-r-2 border-l-4 font-black ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`} style={{ borderLeftColor: p.groupInfo.color }}>{p.cod}</td>
+                                <td className={`p-4 sticky left-0 z-10 border-r-2 border-l-4 font-black ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`} style={{ borderLeftColor: p.groupInfo.color }}>
+                                    <div>{p.cod}</div>
+                                    <div className="text-[9px] text-slate-500 uppercase font-bold">{p.desc}</div>
+                                </td>
                                 {purchaseOrdersInView.map(o => (
-                                  <td key={o.id} className="p-2 border-l border-slate-200/10 text-center font-black">
+                                  <td key={o.id} className={`p-2 border-l border-slate-200/10 text-center font-black ${o.isGhost ? 'opacity-40 bg-slate-200/50 dark:bg-slate-800/50' : ''}`}>
                                     <input type="number" min="0" value={p?.purchases_map?.[o.id] || 0} onChange={(e) => updatePurchaseQty(p.id, o.id, e.target.value)} className="w-16 text-center rounded-lg border-2 font-black text-blue-600 outline-none theme-select" />
                                   </td>
                                 ))}
@@ -724,10 +832,11 @@ export default function App() {
                        <table className="w-full text-sm border-collapse font-black">
                          <thead className="uppercase text-[10px] font-black table-header-dark text-white sticky top-0 z-10">
                            <tr>
-                             <th className="p-5 text-left sticky left-0 z-20 bg-[#0f172a] border-r border-slate-700 min-w-[180px] high-contrast-text">Produto</th>
+                             <th className="p-5 text-left sticky left-0 z-20 bg-[#0f172a] border-r border-slate-700 min-w-[180px] high-contrast-text">Modelo / Descrição</th>
                              {displayedPeriodsInSalesTable.map(p => (
-                               <th key={p.id} className="p-4 text-center text-orange-400 border-l border-slate-700 group font-black whitespace-nowrap min-w-[100px] bg-[#0f172a]">
+                               <th key={p.id} className={`p-4 text-center text-white border-l border-slate-700 group relative whitespace-nowrap min-w-[100px] ${p.isGhost ? 'bg-slate-700 opacity-60' : 'bg-[#0f172a]'}`}>
                                   <span className="high-contrast-text">{MONTH_NAMES[p.month]}/{String(p.year).slice(-2)}</span>
+                                  <button onClick={() => togglePeriodGhost(p.id, p.isGhost)} className={`absolute top-1 left-2 transition-opacity ${p.isGhost ? 'opacity-100 text-yellow-400' : 'opacity-0 group-hover:opacity-100 text-white'}`} title="Tornar Fantasma"><Ghost size={12} /></button>
                                   <button onClick={() => { setPeriodToDelete(p); setIsPeriodDeleteModalOpen(true); }} className="ml-2 text-red-500 opacity-0 group-hover:opacity-100 transition-opacity"><X size={10} /></button>
                                </th>
                              ))}
@@ -737,15 +846,19 @@ export default function App() {
                          </thead>
                          <tbody className={`divide-y-2 ${isDark ? 'divide-slate-800' : 'divide-slate-200'}`}>
                            {dashboardFilteredData.map(p => {
-                             const totalFilteredSales = displayedPeriodsInSalesTable.reduce((acc, dp) => acc + (parseInt(p?.sales?.[dp.year]?.[dp.month]) || 0), 0);
+                             const totalFilteredSales = displayedPeriodsInSalesTable.reduce((acc, dp) => {
+                               if (dp.isGhost) return acc;
+                               return acc + (parseInt(p?.sales?.[dp.year]?.[dp.month]) || 0);
+                             }, 0);
+
                              return (
                                <tr key={p.id} className="hover:bg-blue-500/5 transition-colors font-black table-row-hover">
                                  <td className={`p-4 font-black border-l-4 sticky left-0 z-10 border-r-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`} style={{ borderLeftColor: p.groupInfo.color }}>
                                     <div className="text-sm">{p.cod}</div>
-                                    <div className="text-[9px] text-slate-500 italic uppercase font-black truncate max-w-[150px]">{p.desc}</div>
+                                    <div className="text-[9px] text-slate-500 italic uppercase font-bold truncate max-w-[150px]">{p.desc}</div>
                                  </td>
                                  {displayedPeriodsInSalesTable.map(dp => (
-                                   <td key={dp.id} className="p-2 border-l border-slate-200/10 text-center">
+                                   <td key={dp.id} className={`p-2 border-l border-slate-200/10 text-center ${dp.isGhost ? 'opacity-40 bg-slate-200/50 dark:bg-slate-800/50' : ''}`}>
                                      <input type="number" min="0" defaultValue={p?.sales?.[dp.year]?.[dp.month] || 0} onBlur={(e) => updateMonthlySale(p.id, dp.year, dp.month, e.target.value)} className="w-16 text-center border-2 rounded-lg p-1.5 font-black outline-none focus:ring-1 focus:ring-orange-400 theme-select" />
                                    </td>
                                  ))}
@@ -798,7 +911,7 @@ export default function App() {
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 font-black">
                     <div className={`p-6 rounded-2xl border-2 shadow-sm space-y-4 ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
                         <h3 className="text-lg font-black flex items-center gap-2 italic text-orange-500"><Tag size={20} /> Novo Grupo</h3>
-                        <input type="text" placeholder="Nome" className="w-full p-3 rounded-xl outline-none uppercase font-black border-2 theme-input" value={newGroupData.name} onChange={e => setNewGroupData({...newGroupData, name: e.target.value.toUpperCase()})} />
+                        <input type="text" placeholder="Nome" className="w-full p-3 rounded-xl outline-none font-black border-2 theme-input" value={newGroupData.name} onChange={e => setNewGroupData({...newGroupData, name: e.target.value.toUpperCase()})} />
                         <div className="flex gap-2">
                             <input type="color" className="w-12 h-10 border-none bg-transparent" value={newGroupData.color} onChange={e => setNewGroupData({...newGroupData, color: e.target.value})} />
                             <button onClick={handleSaveGroup} className="flex-1 bg-orange-600 text-white rounded-xl text-xs uppercase font-black hover:bg-orange-500 transition-all shadow-md border-2 border-transparent">Salvar</button>
@@ -855,7 +968,23 @@ export default function App() {
         </>
       )}
 
-      {/* Modais de Exclusão e Período */}
+      {/* Modais de Exclusão */}
+      {[
+        { open: isDeleteModalOpen, setOpen: setIsDeleteModalOpen, confirm: confirmDeleteProduct, title: "Excluir Permanente?", body: `Remover ${productToDelete?.cod}?` },
+        { open: isOrderDeleteModalOpen, setOpen: setIsOrderDeleteModalOpen, confirm: confirmDeleteOrder, title: "Excluir Lote?", body: `Remover lote ${orderToDelete?.order_num}?` },
+        { open: isPeriodDeleteModalOpen, setOpen: setIsPeriodDeleteModalOpen, confirm: confirmDeletePeriod, title: "Excluir Período?", body: `Remover mês ${MONTH_NAMES[periodToDelete?.month]} / ${periodToDelete?.year}?` }
+      ].map((m, i) => m.open && (
+        <div key={i} className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm font-black animate-in fade-in">
+          <div className={`rounded-3xl shadow-2xl w-full max-sm p-10 text-center border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
+            <AlertTriangle className="mx-auto text-red-600 mb-4 animate-bounce" size={48} />
+            <h3 className="text-xl font-black uppercase mb-8 text-red-500">{m.title}</h3>
+            <p className="mb-8 font-black">{m.body}</p>
+            <div className="flex gap-3"><button onClick={() => m.setOpen(false)} className="flex-1 py-3 border-2 rounded-xl uppercase font-black theme-select">Não</button><button onClick={m.confirm} className="flex-1 py-3 bg-red-600 text-white rounded-xl uppercase font-black shadow-lg border-2 border-transparent high-contrast-text">Deletar</button></div>
+          </div>
+        </div>
+      ))}
+
+      {/* Modal Período */}
       {isPeriodModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in zoom-in-95 font-black">
           <div className={`rounded-3xl shadow-2xl w-full max-w-md p-8 border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
@@ -869,6 +998,7 @@ export default function App() {
         </div>
       )}
 
+      {/* Modal Logout */}
       {isLogoutModalOpen && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center p-4 bg-slate-950/90 backdrop-blur-sm font-black">
           <div className={`rounded-3xl shadow-2xl w-full max-sm p-10 text-center border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
@@ -880,6 +1010,7 @@ export default function App() {
         </div>
       )}
 
+      {/* Modal Produto */}
       {isProductModalOpen && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in zoom-in-95 font-black">
           <div className={`rounded-3xl shadow-2xl w-full max-w-md p-8 border-2 ${isDark ? 'bg-slate-900 border-slate-800 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
@@ -893,22 +1024,6 @@ export default function App() {
           </div>
         </div>
       )}
-
-      {/* Modais de Exclusão */}
-      {[
-        { open: isDeleteModalOpen, setOpen: setIsDeleteModalOpen, confirm: confirmDeleteProduct, title: "Excluir Permanente?", body: `Remover ${productToDelete?.cod}?` },
-        { open: isOrderDeleteModalOpen, setOpen: setIsOrderDeleteModalOpen, confirm: confirmDeleteOrder, title: "Excluir Lote?", body: `Remover lote ${orderToDelete?.order_num}?` },
-        { open: isPeriodDeleteModalOpen, setOpen: setIsPeriodDeleteModalOpen, confirm: confirmDeletePeriod, title: "Excluir Período?", body: `Remover mês ${MONTH_NAMES[periodToDelete?.month]} / ${periodToDelete?.year}?` }
-      ].map((m, i) => m.open && (
-        <div key={i} className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm font-black animate-in fade-in">
-          <div className={`rounded-3xl shadow-2xl w-full max-sm p-10 text-center border-2 ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 text-slate-900'}`}>
-            <AlertTriangle className="mx-auto text-red-600 mb-4 animate-bounce" size={48} />
-            <h3 className="text-xl font-black uppercase mb-8 text-red-500">{m.title}</h3>
-            <p className="mb-8 font-black">{m.body}</p>
-            <div className="flex gap-3"><button onClick={() => m.setOpen(false)} className="flex-1 py-3 border-2 rounded-xl uppercase font-black theme-select">Não</button><button onClick={m.confirm} className="flex-1 py-3 bg-red-600 text-white rounded-xl uppercase font-black shadow-lg border-2 border-transparent high-contrast-text">Deletar</button></div>
-          </div>
-        </div>
-      ))}
     </div>
   );
 }
